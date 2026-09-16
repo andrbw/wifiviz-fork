@@ -220,7 +220,7 @@ EmitMacDelayRecord(RingBuffer* ring,
                    sim_time_ns_t delayNs,
                    uint8_t delayKind)
 {
-    if (!ring || delayNs == 0)
+    if (!ring)
     {
         return;
     }

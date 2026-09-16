@@ -70,10 +70,6 @@ LatencyChartWidget::appendPpdu(const PpduVisualItem& ppdu)
     }
 
     const uint64_t latencyNs = metricValueNs(ppdu);
-    if (latencyNs == 0)
-    {
-        return;
-    }
 
     bool wasAtEnd = false;
     if (m_hScroll)
@@ -81,7 +77,7 @@ LatencyChartWidget::appendPpdu(const PpduVisualItem& ppdu)
         wasAtEnd = (m_hScroll->value() == m_hScroll->maximum());
     }
 
-    const uint32_t latencyUsX10 = static_cast<uint32_t>(std::max<uint64_t>(1, latencyNs / 100));
+    const uint32_t latencyUsX10 = static_cast<uint32_t>(latencyNs / 100);
     m_sampleTimeNs.append(ns);
     m_sampleLatencyUsX10.append(latencyUsX10);
     m_sampleItems.append(ppdu);
