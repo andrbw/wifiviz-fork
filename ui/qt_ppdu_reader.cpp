@@ -55,6 +55,17 @@ void QtPpduReader::run()
         {
             scoped_lock<interprocess_mutex> lock(m_ring->mutex);
 
+            // Workaround: read_index must never get ahead of write_index, but it can when
+            // two viewers draining the same segment both pass the "has data" test on the
+            // last record and both increment it.
+            if (m_ring->read_index > m_ring->write_index)
+            {
+                qWarning() << "[PPDU] read_index" << m_ring->read_index
+                           << "is ahead of write_index" << m_ring->write_index
+                           << "- resynchronising (concurrent viewer?)";
+                m_ring->read_index = m_ring->write_index;
+            }
+
             // 等待数据或退出信号，加入超时防止挂死
             // For now, use legacy timed_wait() against an absolute UTC
             // deadline as the equivalent of wait_for().
@@ -62,7 +73,7 @@ void QtPpduReader::run()
                 lock,
                 boost::posix_time::microsec_clock::universal_time() +
                     boost::posix_time::milliseconds(100),
-                [&] { return m_ring->read_index != m_ring->write_index || !m_running; });
+                [&] { return m_ring->read_index < m_ring->write_index || !m_running; });
 
             if (!hasData)
             {
