@@ -56,8 +56,12 @@ void QtPpduReader::run()
             scoped_lock<interprocess_mutex> lock(m_ring->mutex);
 
             // 等待数据或退出信号，加入超时防止挂死
-            bool hasData = m_ring->cond.wait_for(
-                lock, boost::posix_time::milliseconds(100),
+            // For now, use legacy timed_wait() against an absolute UTC
+            // deadline as the equivalent of wait_for().
+            bool hasData = m_ring->cond.timed_wait(
+                lock,
+                boost::posix_time::microsec_clock::universal_time() +
+                    boost::posix_time::milliseconds(100),
                 [&] { return m_ring->read_index != m_ring->write_index || !m_running; });
 
             if (!hasData)
