@@ -4,6 +4,7 @@
 
 #include <QCloseEvent>
 #include <QHBoxLayout>
+#include <QScrollArea>
 #include <QStatusBar>
 #include <QTimer>
 #include <QWidget>
@@ -25,7 +26,12 @@ TimelineWindow::TimelineWindow(QWidget* parent)
     layout->addWidget(m_timelineDisplay, 1);
     layout->addWidget(m_detailWindow);
 
-    setCentralWidget(central);
+    // Add scroll bar
+    auto* scrollArea = new QScrollArea(this);
+    scrollArea->setWidget(central);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    setCentralWidget(scrollArea);
     setWindowTitle("WiFiViz");
     resize(1600, 900);
 

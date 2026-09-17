@@ -12,6 +12,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
@@ -29,6 +30,27 @@ Timeline_Display::Timeline_Display(QWidget *parent)
     , ui(new Ui::Timeline_Display)
 {
     ui->setupUi(this);
+
+    //Grid to distribute the space proportionally at any resolution.
+    for (QWidget* w : {static_cast<QWidget*>(ui->widget),
+                       static_cast<QWidget*>(ui->widget_2),
+                       static_cast<QWidget*>(ui->widget_3),
+                       static_cast<QWidget*>(ui->frame),
+                       static_cast<QWidget*>(ui->frame_2),
+                       static_cast<QWidget*>(ui->frame_3)})
+    {
+        if (w)
+        {
+            w->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        }
+    }
+    if (auto* grid = qobject_cast<QGridLayout*>(layout()))
+    {
+        grid->setRowStretch(0, 3);    // timeline: the main view, gets the most room
+        grid->setRowStretch(1, 2);    // chart row underneath it
+        grid->setColumnStretch(0, 1); // throughput chart
+        grid->setColumnStretch(1, 2); // latency + metrics stack
+    }
 
     m_timelineView = new PpduTimelineView(ui->frame_3);
     m_timelineView->setSizePolicy(

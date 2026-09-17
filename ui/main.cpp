@@ -25,8 +25,10 @@
 
 namespace
 {
-constexpr int kDesignWidth = 2560;
-constexpr int kDesignHeight = 1440;
+// Smallest window in which the timeline dashboard lays out without clipping, measured from
+// the realised widget tree (the central widget's minimumSizeHint is ~1529x702).
+constexpr int kMinContentWidth = 1530;
+constexpr int kMinContentHeight = 700;
 
 struct ScreenSize
 {
@@ -201,6 +203,13 @@ ScreenSizeFromXdpyinfo()
     return ScreenSize{std::stoi(match[1].str()), std::stoi(match[2].str())};
 }
 
+bool
+EnvFlagEnabled(const char* name)
+{
+    const QString value = qEnvironmentVariable(name).trimmed().toLower();
+    return value == "1" || value == "true";
+}
+
 std::optional<double>
 ScaleFromEnvironment()
 {
@@ -222,14 +231,9 @@ ScaleFromEnvironment()
 void
 ApplyDesignScale()
 {
-    const QString disabled = qEnvironmentVariable("WIFIVIZ_DISABLE_AUTO_SCALE").trimmed();
-    if (!disabled.isEmpty())
+    if (EnvFlagEnabled("WIFIVIZ_DISABLE_AUTO_SCALE"))
     {
-        const QString value = disabled.toLower();
-        if (value == "1" || value == "true")
-        {
-            return;
-        }
+        return;
     }
 
     if (!ScaleFromEnvironment() && qEnvironmentVariableIsSet("QT_SCALE_FACTOR"))
@@ -255,8 +259,20 @@ ApplyDesignScale()
             return;
         }
 
-        scale = std::min(static_cast<double>(screen->width) / kDesignWidth,
-                         static_cast<double>(screen->height) / kDesignHeight);
+        // Shrink only when the dashboard genuinely does not fit, and never magnify.
+        // Qt already performs DPI scaling on its own: it takes the compositor's scale factor
+        // and reports it as the device pixel ratio, so a HiDPI panel is handled natively and
+        // correctly.
+        // The only case left is a screen too small to show the dashboard at
+        // 1:1. There, the dashboard should shrink to fit. Anywhere else, return and
+        // leave Qt's own handling untouched.
+        const double fit = std::min(static_cast<double>(screen->width) / kMinContentWidth,
+                                    static_cast<double>(screen->height) / kMinContentHeight);
+        if (fit >= 1.0)
+        {
+            return;
+        }
+        scale = fit;
     }
 
     if (*scale <= 0.0)
