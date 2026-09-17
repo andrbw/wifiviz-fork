@@ -11,6 +11,9 @@
 
 #include <QFileDialog>
 #include <QInputDialog>
+#include <QRect>
+
+#include <algorithm>
 
 #include "ppdu_visual_item.h"
 #include "ppdu_detail_window.h"
@@ -19,6 +22,7 @@
 #include "utils.h"
 
 class QPainter;
+class QScrollBar;
 
 enum class TimelineRowMode
 {
@@ -77,6 +81,30 @@ struct CachedPhyStateRow
     QVector<int> itemIndices;
 };
 
+/* Geometry of the band the timeline rows are drawn in: everything between the toolbar at the
+ * top and the time axis at the bottom. Rows shrink to fit that band down to a minimum height;
+ * past that the band scrolls, so a run with more stations than fit on screen keeps every row
+ * reachable instead of dropping the ones that fall past the bottom edge. */
+struct TimelineRowBand
+{
+    int rowH = 0;      // height of a single row
+    int topY = 0;      // y of row 0, scroll already applied (above bandTop when scrolled)
+    int bandTop = 0;   // top of the band
+    int bandH = 0;     // visible height of the band
+    int contentH = 0;  // height of all rows together
+    int scroll = 0;    // how far the rows are scrolled up, in pixels
+    int maxScroll = 0; // 0 while every row fits
+
+    int bandBottom() const { return bandTop + bandH; }
+    // First and last row pixel actually on screen. Anything drawn under the rows -- the time
+    // axis, the conflict bar -- hangs off axisY(), which is the bottom of the rows while they
+    // all fit and the bottom of the band once they do not.
+    int visibleTopY() const { return std::max(topY, bandTop); }
+    int axisY() const { return std::min(topY + contentH, bandTop + bandH); }
+    int visibleH() const { return std::max(0, axisY() - visibleTopY()); }
+    bool containsY(int y) const { return y >= bandTop && y < bandTop + bandH; }
+};
+
 struct DeviceNodeInfo
 {
     uint16_t nodeId = 0;
@@ -127,6 +155,10 @@ private slots:
 private:
     /* ===== geometry ===== */
     int apCount() const;
+    TimelineRowBand rowBand(int rowCount, int minRowH, int maxRowH) const;
+    QRect rowClipRect(const TimelineRowBand &band) const;
+    void syncVScrollBar(const TimelineRowBand &band);
+    void scrollRowsBy(int deltaPx);
     int effectiveRowHeight() const;
     int timelineTopY() const;
     void paintPpduTimeline(QPainter &painter);
@@ -194,6 +226,8 @@ private:
 
     /* row layout (IMPORTANT: shared!) */
     int m_rowHeight = 30;
+    mutable int m_rowScroll = 0;
+    bool m_bandSynced = false;
     QPoint m_mousePos;
 
 
@@ -217,6 +251,7 @@ private:
     QPushButton *m_btnSetTimeRange = nullptr;
     QPushButton *quitButton = nullptr;
     QPushButton *m_btnChannel = nullptr;
+    QScrollBar *m_vScroll = nullptr;
 
     PpduInfoOverlay *m_overlay = nullptr;
     LegendOverlay *m_legendOverlay = nullptr;

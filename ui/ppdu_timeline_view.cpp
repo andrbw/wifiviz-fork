@@ -8,6 +8,8 @@
 #include <QTimer>
 #include <QWheelEvent>
 #include <QToolTip>
+#include <QScrollBar>
+#include <QSignalBlocker>
 
 #include <algorithm>
 #include <cmath>
@@ -36,6 +38,7 @@ static constexpr int kRangeBarHeight = 16;
 static constexpr int kRangeHandleW = 8;
 static constexpr int kRangeBarMargin = 10;
 static constexpr int kRangeBarBottomPadding = 10;
+static constexpr int kVScrollWidth = 12;
 
 static constexpr uint64_t kBroadcastMac = 0xFFFFFFFFFFFFULL;
 
@@ -838,6 +841,21 @@ PpduTimelineView::PpduTimelineView(QWidget *parent)
     connect(m_btnLegend, &QPushButton::clicked,
             this, &PpduTimelineView::onToggleLegend);
 
+    // Rows live in a fixed band between the toolbar and the time axis. Once more rows are
+    // recorded than fit there at their minimum height, this bar scrolls the band rather than
+    // letting the surplus rows fall off the bottom edge unseen.
+    m_vScroll = new QScrollBar(Qt::Vertical, this);
+    m_vScroll->setCursor(Qt::ArrowCursor);
+    m_vScroll->setRange(0, 0);
+    m_vScroll->hide();
+    connect(m_vScroll, &QScrollBar::valueChanged, this, [this](int value) {
+        if (value == m_rowScroll)
+            return;
+        m_rowScroll = value;
+        hideHoverUi();
+        update();
+    });
+
     m_legendOverlay = new LegendOverlay(this);
     centerWindow(this);
     m_legendOverlay->close();
@@ -1004,11 +1022,12 @@ bool PpduTimelineView::showRowLabelTooltip(const QPoint &pos)
     if (rowCount == 0)
         return false;
 
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / rowCount, 18, 80);
-    int topY = m_topMargin;
-    if (availH > rowCount * rowH)
-        topY += (availH - rowCount * rowH) / 2;
+    const TimelineRowBand band = rowBand(rowCount, 18, 80);
+    if (!band.containsY(pos.y()))
+        return false;
+
+    const int rowH = band.rowH;
+    const int topY = band.topY;
 
     for (int rowIndex = 0; rowIndex < m_cachedPpduRows.size(); ++rowIndex)
     {
@@ -1152,6 +1171,7 @@ void PpduTimelineView::onToggleChannelView()
     }
 
     updateModeButton();
+    m_rowScroll = 0;
     m_hoverIndex = -1;
     m_showingStats = false;
     m_overlay->close();
@@ -1547,6 +1567,81 @@ int PpduTimelineView::timelineTopY() const
     return y;
 }
 
+TimelineRowBand PpduTimelineView::rowBand(int rowCount, int minRowH, int maxRowH) const
+{
+    TimelineRowBand band;
+    const int rows = std::max(1, rowCount);
+
+    // The toolbar floats over the top left corner rather than sitting in a layout, so the band
+    // starts below it: at 40-odd rows the rows are thin enough that the first one would
+    // otherwise be drawn underneath the buttons and never seen.
+    band.bandTop = m_topMargin;
+    if (m_btnSave)
+        band.bandTop = std::max(band.bandTop, m_btnSave->geometry().bottom() + 6);
+    band.bandH = std::max(0, height() - band.bandTop - kBottomMargin);
+    band.rowH = std::clamp(band.bandH / rows, minRowH, maxRowH);
+    band.contentH = rows * band.rowH;
+    band.maxScroll = std::max(0, band.contentH - band.bandH);
+
+    m_rowScroll = std::clamp(m_rowScroll, 0, band.maxScroll);
+    band.scroll = m_rowScroll;
+
+    band.topY = band.bandTop - band.scroll;
+    if (band.maxScroll == 0)
+        band.topY += (band.bandH - band.contentH) / 2; // centre them while they all fit
+
+    return band;
+}
+
+/* Rows are painted through this rect, so the ones scrolled past either edge of the band stop
+ * at the band instead of bleeding into the toolbar or the time axis. */
+QRect PpduTimelineView::rowClipRect(const TimelineRowBand &band) const
+{
+    const int right = (m_vScroll && m_vScroll->isVisible()) ? m_vScroll->x() : width();
+    return QRect(0, band.bandTop, std::max(0, right), band.bandH);
+}
+
+void PpduTimelineView::syncVScrollBar(const TimelineRowBand &band)
+{
+    m_bandSynced = true;
+    if (!m_vScroll)
+        return;
+
+    if (band.maxScroll <= 0)
+    {
+        const QSignalBlocker blocker(m_vScroll);
+        m_vScroll->setRange(0, 0);
+        m_vScroll->setValue(0);
+        m_vScroll->hide();
+        return;
+    }
+
+    // Start below the Legend button, which floats over the top right corner of the view.
+    const int top = std::max(band.bandTop,
+                             m_btnLegend ? m_btnLegend->geometry().bottom() + 6 : band.bandTop);
+    m_vScroll->setGeometry(width() - kVScrollWidth - 2,
+                           top,
+                           kVScrollWidth,
+                           std::max(0, band.bandBottom() - top));
+    {
+        const QSignalBlocker blocker(m_vScroll);
+        m_vScroll->setRange(0, band.maxScroll);
+        m_vScroll->setPageStep(std::max(1, band.bandH));
+        m_vScroll->setSingleStep(std::max(1, band.rowH));
+        m_vScroll->setValue(band.scroll);
+    }
+    m_vScroll->show();
+    m_vScroll->raise();
+}
+
+void PpduTimelineView::scrollRowsBy(int deltaPx)
+{
+    if (!m_vScroll || m_vScroll->maximum() <= 0 || deltaPx == 0)
+        return;
+
+    m_vScroll->setValue(m_vScroll->value() + deltaPx);
+}
+
 /* ======================== Data ======================== */
 
 void PpduTimelineView::append(const PpduVisualItem &ppdu)
@@ -1652,6 +1747,7 @@ void PpduTimelineView::clear()
     m_pressedIndex = -1;
     m_deviceInfoMap.clear();
     m_nodeToMacMap.clear();
+    m_rowScroll = 0;
     if (m_detailWindow)
     {
         m_detailWindow->clearDetails();
@@ -1735,31 +1831,33 @@ void PpduTimelineView::paintEvent(QPaintEvent *)
     QPainter painter(this);
     painter.fillRect(rect(), kBgColor);
 
+    m_bandSynced = false;
+
     if (m_viewMode == TimelineViewMode::ChannelState)
     {
         paintChannelStateView(painter);
-        return;
     }
-
-    if (m_viewMode == TimelineViewMode::MloChannelState)
+    else if (m_viewMode == TimelineViewMode::MloChannelState)
     {
         paintMloChannelStateView(painter);
-        return;
     }
-
-    if (m_viewMode == TimelineViewMode::PhyStateTimeline)
+    else if (m_viewMode == TimelineViewMode::PhyStateTimeline)
     {
         paintPhyStateTimeline(painter);
-        return;
     }
-
-    if (m_viewMode == TimelineViewMode::RxTimeline)
+    else if (m_viewMode == TimelineViewMode::RxTimeline)
     {
         paintRxTimeline(painter);
-        return;
+    }
+    else
+    {
+        paintPpduTimeline(painter);
     }
 
-    paintPpduTimeline(painter);
+    // A view that bailed out early (no records yet) reports no band; drop the scrollbar so it
+    // does not linger over an empty view.
+    if (!m_bandSynced)
+        syncVScrollBar(TimelineRowBand{});
 }
 
 void PpduTimelineView::paintPpduTimeline(QPainter &painter)
@@ -1770,14 +1868,16 @@ void PpduTimelineView::paintPpduTimeline(QPainter &painter)
     if (rowCount == 0)
         return;
 
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / rowCount, 18, 80);
-    int topY = m_topMargin;
-    if (availH > rowCount * rowH)
-        topY += (availH - rowCount * rowH) / 2;
-    const int rowsBottomY = topY + rowCount * rowH;
+    const TimelineRowBand band = rowBand(rowCount, 18, 80);
+    syncVScrollBar(band);
+    const int rowH = band.rowH;
+    const int topY = band.topY;
+    const int rowsBottomY = band.axisY();
     const int conflictTopY = rowsBottomY + kConflictAxisGap;
     const int conflictBottomY = conflictTopY + kConflictAxisHeight;
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     if (m_hoverIndex >= 0 && m_hoverIndex < m_cachedPpduLayout.size())
     {
@@ -1815,8 +1915,13 @@ void PpduTimelineView::paintPpduTimeline(QPainter &painter)
                          rowInfo.label);
 
 	    }
+    painter.restore();
+
     painter.setPen(QColor(180, 180, 180));
-    painter.drawLine(m_leftMargin - 8, topY, m_leftMargin - 8, conflictBottomY);
+    painter.drawLine(m_leftMargin - 8, band.visibleTopY(), m_leftMargin - 8, conflictBottomY);
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     for (int rowIndex = 0; rowIndex < m_cachedPpduRows.size(); ++rowIndex)
     {
@@ -1851,6 +1956,8 @@ void PpduTimelineView::paintPpduTimeline(QPainter &painter)
             painter.drawRoundedRect(r, 3, 3);
         }
     }
+
+    painter.restore();
 
     const uint64_t startNs = m_viewStartNs;
     const uint64_t endNs = m_viewStartNs + width() / m_nsToPixel;
@@ -1893,7 +2000,7 @@ void PpduTimelineView::paintPpduTimeline(QPainter &painter)
         uint64_t ns = startNs + i * (endNs - startNs) / 10;
         int x = m_leftMargin + (ns - m_viewStartNs) * m_nsToPixel;
 
-        painter.drawLine(x, topY, x, conflictBottomY);
+        painter.drawLine(x, band.visibleTopY(), x, conflictBottomY);
         painter.drawText(x - 20,
                          conflictBottomY + 16,
                          QString::number(ns / 1e6, 'f', 2) + " ms");
@@ -1914,9 +2021,9 @@ void PpduTimelineView::paintPpduTimeline(QPainter &painter)
         {
             QRectF selRect(
                 left,
-                topY,
+                band.visibleTopY(),
                 right - left,
-                rowCount * rowH);
+                band.visibleH());
 
             painter.setPen(QPen(kSelectBorder, 1, Qt::DashLine));
             painter.setBrush(kSelectFill);
@@ -1970,14 +2077,16 @@ void PpduTimelineView::paintRxTimeline(QPainter &painter)
     if (rowCount == 0)
         return;
 
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / rowCount, 18, 80);
-    int topY = m_topMargin;
-    if (availH > rowCount * rowH)
-        topY += (availH - rowCount * rowH) / 2;
+    const TimelineRowBand band = rowBand(rowCount, 18, 80);
+    syncVScrollBar(band);
+    const int rowH = band.rowH;
+    const int topY = band.topY;
 
     painter.setPen(QColor(90, 90, 90));
     painter.drawText(m_leftMargin, 16, "RX Timeline");
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     if (m_hoverIndex >= 0 && m_hoverIndex < m_cachedPpduLayout.size())
     {
@@ -2013,8 +2122,13 @@ void PpduTimelineView::paintRxTimeline(QPainter &painter)
 
     }
 
+    painter.restore();
+
     painter.setPen(QColor(180, 180, 180));
-    painter.drawLine(m_leftMargin - 8, topY, m_leftMargin - 8, topY + rowCount * rowH);
+    painter.drawLine(m_leftMargin - 8, band.visibleTopY(), m_leftMargin - 8, band.axisY());
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     for (int rowIndex = 0; rowIndex < m_cachedPpduRows.size(); ++rowIndex)
     {
@@ -2056,6 +2170,8 @@ void PpduTimelineView::paintRxTimeline(QPainter &painter)
         }
     }
 
+    painter.restore();
+
     const QPen gridPen(QColor(180, 180, 180), 1, Qt::DashLine);
     painter.setPen(gridPen);
     const uint64_t visibleStartNs = std::max<uint64_t>(0, m_viewStartNs);
@@ -2065,9 +2181,9 @@ void PpduTimelineView::paintRxTimeline(QPainter &painter)
     {
         const uint64_t ns = visibleStartNs + i * (visibleEndNs - visibleStartNs) / 10;
         const int x = m_leftMargin + (ns - visibleStartNs) * m_nsToPixel;
-        painter.drawLine(x, topY, x, topY + rowCount * rowH);
+        painter.drawLine(x, band.visibleTopY(), x, band.axisY());
         painter.drawText(x - 20,
-                         topY + rowCount * rowH + 15,
+                         band.axisY() + 15,
                          QString::number(ns / 1e6, 'f', 2) + " ms");
     }
 
@@ -2083,7 +2199,7 @@ void PpduTimelineView::paintRxTimeline(QPainter &painter)
         {
             painter.setPen(QPen(kSelectBorder, 1, Qt::DashLine));
             painter.setBrush(kSelectFill);
-            painter.drawRect(QRectF(left, topY, right - left, rowCount * rowH));
+            painter.drawRect(QRectF(left, band.visibleTopY(), right - left, band.visibleH()));
         }
     }
 
@@ -2141,11 +2257,16 @@ void PpduTimelineView::paintChannelStateView(QPainter &painter)
         return;
 
     const int channelCount = channels.size();
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / channelCount, 22, 84);
-    int topY = m_topMargin;
-    if (availH > channelCount * rowH)
-        topY += (availH - channelCount * rowH) / 2;
+    const TimelineRowBand band = rowBand(channelCount, 22, 84);
+    syncVScrollBar(band);
+    const int rowH = band.rowH;
+    const int topY = band.topY;
+
+    painter.setPen(QColor(90, 90, 90));
+    painter.drawText(m_leftMargin, 16, "Channel State View");
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     painter.setPen(QColor(200, 200, 200));
     for (int r = 0; r <= channelCount; ++r)
@@ -2153,9 +2274,6 @@ void PpduTimelineView::paintChannelStateView(QPainter &painter)
         const int y = topY + r * rowH;
         painter.drawLine(m_leftMargin, y, width(), y);
     }
-
-    painter.setPen(QColor(90, 90, 90));
-    painter.drawText(m_leftMargin, 16, "Channel State View");
 
     painter.setPen(Qt::black);
     for (int i = 0; i < channels.size(); ++i)
@@ -2166,16 +2284,21 @@ void PpduTimelineView::paintChannelStateView(QPainter &painter)
             QString("CH %1").arg(channels[i]));
     }
 
+    painter.restore();
+
     painter.setPen(QColor(180, 180, 180));
     painter.drawLine(
         m_leftMargin - 8,
-        topY,
+        band.visibleTopY(),
         m_leftMargin - 8,
-        topY + channelCount * rowH);
+        band.axisY());
 
     const uint64_t visibleStartNs = std::max<uint64_t>(0, m_viewStartNs);
     const uint64_t visibleEndNs = visibleStartNs +
                                   std::max<int>(1, width()) / m_nsToPixel;
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     for (int row = 0; row < channels.size(); ++row)
     {
@@ -2221,6 +2344,8 @@ void PpduTimelineView::paintChannelStateView(QPainter &painter)
         }
     }
 
+    painter.restore();
+
     const QPen gridPen(QColor(180, 180, 180), 1, Qt::DashLine);
     painter.setPen(gridPen);
     for (int i = 0; i <= 10; ++i)
@@ -2228,10 +2353,10 @@ void PpduTimelineView::paintChannelStateView(QPainter &painter)
         const uint64_t ns =
             visibleStartNs + i * (visibleEndNs - visibleStartNs) / 10;
         const int x = m_leftMargin + (ns - visibleStartNs) * m_nsToPixel;
-        painter.drawLine(x, topY, x, topY + channelCount * rowH);
+        painter.drawLine(x, band.visibleTopY(), x, band.axisY());
         painter.drawText(
             x - 20,
-            topY + channelCount * rowH + 15,
+            band.axisY() + 15,
             QString::number(ns / 1e6, 'f', 2) + " ms");
     }
 
@@ -2247,9 +2372,9 @@ void PpduTimelineView::paintChannelStateView(QPainter &painter)
         {
             const QRectF selectionRect(
                 left,
-                topY,
+                band.visibleTopY(),
                 right - left,
-                channelCount * rowH);
+                band.visibleH());
 
             painter.setPen(QPen(kSelectBorder, 1, Qt::DashLine));
             painter.setBrush(kSelectFill);
@@ -2313,11 +2438,16 @@ void PpduTimelineView::paintMloChannelStateView(QPainter &painter)
         return;
 
     const int rowCount = rows.size();
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / std::max(1, rowCount), 22, 84);
-    int topY = m_topMargin;
-    if (availH > rowCount * rowH)
-        topY += (availH - rowCount * rowH) / 2;
+    const TimelineRowBand band = rowBand(rowCount, 22, 84);
+    syncVScrollBar(band);
+    const int rowH = band.rowH;
+    const int topY = band.topY;
+
+    painter.setPen(QColor(90, 90, 90));
+    painter.drawText(m_leftMargin, 16, "MLO Channel State View");
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     painter.setPen(QColor(200, 200, 200));
     for (int r = 0; r <= rowCount; ++r)
@@ -2325,9 +2455,6 @@ void PpduTimelineView::paintMloChannelStateView(QPainter &painter)
         const int y = topY + r * rowH;
         painter.drawLine(m_leftMargin, y, width(), y);
     }
-
-    painter.setPen(QColor(90, 90, 90));
-    painter.drawText(m_leftMargin, 16, "MLO Channel State View");
 
     painter.setPen(Qt::black);
     for (int row = 0; row < rows.size(); ++row)
@@ -2342,12 +2469,17 @@ void PpduTimelineView::paintMloChannelStateView(QPainter &painter)
                          rows[row].label);
     }
 
+    painter.restore();
+
     painter.setPen(QColor(180, 180, 180));
-    painter.drawLine(m_leftMargin - 8, topY, m_leftMargin - 8, topY + rowCount * rowH);
+    painter.drawLine(m_leftMargin - 8, band.visibleTopY(), m_leftMargin - 8, band.axisY());
 
     const uint64_t visibleStartNs = std::max<uint64_t>(0, m_viewStartNs);
     const uint64_t visibleEndNs =
         visibleStartNs + std::max<int>(1, width()) / m_nsToPixel;
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     for (int row = 0; row < rows.size(); ++row)
     {
@@ -2388,6 +2520,8 @@ void PpduTimelineView::paintMloChannelStateView(QPainter &painter)
         }
     }
 
+    painter.restore();
+
     const QPen gridPen(QColor(180, 180, 180), 1, Qt::DashLine);
     painter.setPen(gridPen);
     for (int i = 0; i <= 10; ++i)
@@ -2395,9 +2529,9 @@ void PpduTimelineView::paintMloChannelStateView(QPainter &painter)
         const uint64_t ns =
             visibleStartNs + i * (visibleEndNs - visibleStartNs) / 10;
         const int x = m_leftMargin + (ns - visibleStartNs) * m_nsToPixel;
-        painter.drawLine(x, topY, x, topY + rowCount * rowH);
+        painter.drawLine(x, band.visibleTopY(), x, band.axisY());
         painter.drawText(x - 20,
-                         topY + rowCount * rowH + 15,
+                         band.axisY() + 15,
                          QString::number(ns / 1e6, 'f', 2) + " ms");
     }
 
@@ -2412,7 +2546,7 @@ void PpduTimelineView::paintMloChannelStateView(QPainter &painter)
 
         if (right > left)
         {
-            const QRectF selectionRect(left, topY, right - left, rowCount * rowH);
+            const QRectF selectionRect(left, band.visibleTopY(), right - left, band.visibleH());
             painter.setPen(QPen(kSelectBorder, 1, Qt::DashLine));
             painter.setBrush(kSelectFill);
             painter.drawRect(selectionRect);
@@ -2458,11 +2592,16 @@ void PpduTimelineView::paintPhyStateTimeline(QPainter &painter)
         return;
 
     const int rowCount = m_cachedPhyStateRows.size();
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / std::max(1, rowCount), 22, 84);
-    int topY = m_topMargin;
-    if (availH > rowCount * rowH)
-        topY += (availH - rowCount * rowH) / 2;
+    const TimelineRowBand band = rowBand(rowCount, 22, 84);
+    syncVScrollBar(band);
+    const int rowH = band.rowH;
+    const int topY = band.topY;
+
+    painter.setPen(QColor(90, 90, 90));
+    painter.drawText(m_leftMargin, 16, "PHY State View");
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     painter.setPen(QColor(200, 200, 200));
     for (int r = 0; r <= rowCount; ++r)
@@ -2471,9 +2610,6 @@ void PpduTimelineView::paintPhyStateTimeline(QPainter &painter)
         painter.drawLine(m_leftMargin, y, width(), y);
     }
 
-    painter.setPen(QColor(90, 90, 90));
-    painter.drawText(m_leftMargin, 16, "PHY State View");
-
     painter.setPen(Qt::black);
     for (int row = 0; row < m_cachedPhyStateRows.size(); ++row)
     {
@@ -2481,12 +2617,17 @@ void PpduTimelineView::paintPhyStateTimeline(QPainter &painter)
         painter.drawText(8, y + 5, m_cachedPhyStateRows[row].label);
     }
 
+    painter.restore();
+
     painter.setPen(QColor(180, 180, 180));
-    painter.drawLine(m_leftMargin - 8, topY, m_leftMargin - 8, topY + rowCount * rowH);
+    painter.drawLine(m_leftMargin - 8, band.visibleTopY(), m_leftMargin - 8, band.axisY());
 
     const uint64_t visibleStartNs = std::max<uint64_t>(0, m_viewStartNs);
     const uint64_t visibleEndNs =
         visibleStartNs + std::max<int>(1, width()) / m_nsToPixel;
+
+    painter.save();
+    painter.setClipRect(rowClipRect(band));
 
     for (int row = 0; row < m_cachedPhyStateRows.size(); ++row)
     {
@@ -2569,6 +2710,8 @@ void PpduTimelineView::paintPhyStateTimeline(QPainter &painter)
         flushPending();
     }
 
+    painter.restore();
+
     const QPen gridPen(QColor(180, 180, 180), 1, Qt::DashLine);
     painter.setPen(gridPen);
     for (int i = 0; i <= 10; ++i)
@@ -2576,9 +2719,9 @@ void PpduTimelineView::paintPhyStateTimeline(QPainter &painter)
         const uint64_t ns =
             visibleStartNs + i * (visibleEndNs - visibleStartNs) / 10;
         const int x = m_leftMargin + (ns - visibleStartNs) * m_nsToPixel;
-        painter.drawLine(x, topY, x, topY + rowCount * rowH);
+        painter.drawLine(x, band.visibleTopY(), x, band.axisY());
         painter.drawText(x - 20,
-                         topY + rowCount * rowH + 15,
+                         band.axisY() + 15,
                          QString::number(ns / 1e6, 'f', 2) + " ms");
     }
 
@@ -2593,7 +2736,7 @@ void PpduTimelineView::paintPhyStateTimeline(QPainter &painter)
 
         if (right > left)
         {
-            const QRectF selectionRect(left, topY, right - left, rowCount * rowH);
+            const QRectF selectionRect(left, band.visibleTopY(), right - left, band.visibleH());
             painter.setPen(QPen(kSelectBorder, 1, Qt::DashLine));
             painter.setBrush(kSelectFill);
             painter.drawRect(selectionRect);
@@ -2765,6 +2908,14 @@ void PpduTimelineView::wheelEvent(QWheelEvent *event)
         return;
     }
 
+    if (event->modifiers() & (Qt::ShiftModifier | Qt::AltModifier))
+    {
+        // Plain wheel has always zoomed the time axis, so the row scroll rides on a modifier.
+        scrollRowsBy(-delta / 2);
+        event->accept();
+        return;
+    }
+
     const int usableWidth = usableTimelineWidth();
     const int mouseX = std::clamp(eventPosition(event).x(), m_leftMargin, m_leftMargin + usableWidth);
     const double anchorPx = double(mouseX - m_leftMargin);
@@ -2913,6 +3064,7 @@ void PpduTimelineView::mouseMoveEvent(QMouseEvent *e)
             m_pressMoved = true;
 
         int dx = e->pos().x() - m_lastMousePos.x();
+        int dy = e->pos().y() - m_lastMousePos.y();
         m_lastMousePos = e->pos();
 
         if (m_pressMoved && qAbs(dx) > 0)
@@ -2922,6 +3074,11 @@ void PpduTimelineView::mouseMoveEvent(QMouseEvent *e)
                 m_nsToPixel);
             syncRangeSliderToView();
             update();
+        }
+
+        if (m_pressMoved && qAbs(dy) > 0)
+        {
+            scrollRowsBy(-dy);
         }
 
         hideHoverUi();
@@ -3081,12 +3238,12 @@ int PpduTimelineView::hitTest(const QPoint &pos) const
     if (rowCnt == 0)
         return -1;
 
-    int availH = height() - m_topMargin - kBottomMargin;
-    int rowH = std::clamp(availH / rowCnt, 18, 80);
+    const TimelineRowBand band = rowBand(rowCnt, 18, 80);
+    if (!band.containsY(pos.y()))
+        return -1;
 
-    int topY = m_topMargin;
-    if (availH > rowCnt * rowH)
-        topY += (availH - rowCnt * rowH) / 2;
+    const int rowH = band.rowH;
+    const int topY = band.topY;
 
     for (int idx = m_ppduItems.size() - 1; idx >= 0; --idx)
     {
@@ -3133,12 +3290,12 @@ bool PpduTimelineView::showChannelStateHover(const QPoint &pos)
     if (globalStartNs >= globalEndNs)
         return false;
 
-    const int channelCount = channels.size();
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / channelCount, 22, 84);
-    int topY = m_topMargin;
-    if (availH > channelCount * rowH)
-        topY += (availH - channelCount * rowH) / 2;
+    const TimelineRowBand band = rowBand(channels.size(), 22, 84);
+    if (!band.containsY(pos.y()))
+        return false;
+
+    const int rowH = band.rowH;
+    const int topY = band.topY;
 
     const uint64_t visibleStartNs = std::max<uint64_t>(0, m_viewStartNs);
     const uint64_t visibleEndNs = visibleStartNs +
@@ -3235,12 +3392,12 @@ bool PpduTimelineView::showMloChannelStateHover(const QPoint &pos)
     if (globalStartNs >= globalEndNs)
         return false;
 
-    const int rowCount = rows.size();
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / std::max(1, rowCount), 22, 84);
-    int topY = m_topMargin;
-    if (availH > rowCount * rowH)
-        topY += (availH - rowCount * rowH) / 2;
+    const TimelineRowBand band = rowBand(rows.size(), 22, 84);
+    if (!band.containsY(pos.y()))
+        return false;
+
+    const int rowH = band.rowH;
+    const int topY = band.topY;
 
     const uint64_t visibleStartNs = std::max<uint64_t>(0, m_viewStartNs);
     const uint64_t visibleEndNs =
@@ -3318,12 +3475,12 @@ bool PpduTimelineView::showPhyStateHover(const QPoint &pos)
     if (m_cachedPhyStateRows.isEmpty() || m_phyStateStartNs >= m_phyStateEndNs)
         return false;
 
-    const int rowCount = m_cachedPhyStateRows.size();
-    const int availH = height() - m_topMargin - kBottomMargin;
-    const int rowH = std::clamp(availH / std::max(1, rowCount), 22, 84);
-    int topY = m_topMargin;
-    if (availH > rowCount * rowH)
-        topY += (availH - rowCount * rowH) / 2;
+    const TimelineRowBand band = rowBand(m_cachedPhyStateRows.size(), 22, 84);
+    if (!band.containsY(pos.y()))
+        return false;
+
+    const int rowH = band.rowH;
+    const int topY = band.topY;
 
     const uint64_t visibleStartNs = std::max<uint64_t>(0, m_viewStartNs);
     const uint64_t visibleEndNs =
@@ -3341,7 +3498,7 @@ bool PpduTimelineView::showPhyStateHover(const QPoint &pos)
     }
 
     const int hoveredRow = (pos.y() - topY) / rowH;
-    if (hoveredRow < 0 || hoveredRow >= m_cachedPhyStateRows.size())
+    if (pos.y() < topY || hoveredRow >= m_cachedPhyStateRows.size())
         return false;
 
     const auto &indices = m_cachedPhyStateRows[hoveredRow].itemIndices;
@@ -3421,6 +3578,7 @@ void PpduTimelineView::resetPage()
     /* ===== view state ===== */
     m_viewStartNs = 0;
     m_nsToPixel = 1e-6;
+    m_rowScroll = 0;
 
     Num_ap = 0;
     Num_sta = 0;

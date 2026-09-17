@@ -520,6 +520,10 @@ depending on the selected timeline mode. The view supports:
 
 - wheel zooming,
 - horizontal navigation,
+- vertical scrolling once a run has more rows than fit on screen: rows shrink to
+  fill the view and, below their minimum height, a scrollbar appears on the right
+  (Shift or Alt with the wheel scrolls too, as does dragging up and down). This
+  applies to every timeline mode, not just the PPDU view,
 - time-range selection,
 - image export,
 - legend display,
