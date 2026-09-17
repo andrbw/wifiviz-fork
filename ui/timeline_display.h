@@ -27,6 +27,9 @@ class QLabel;
 class QStackedWidget;
 class QPlainTextEdit;
 class QPushButton;
+class QSplitter;
+class QResizeEvent;
+class QEvent;
 
 namespace Ui {
 class Timeline_Display;
@@ -49,7 +52,13 @@ public:
     void appendPpdu(const PpduVisualItem &ppdu);
     void showSniffFail();
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
+    void applyDefaultSplitSizes();
+
     void setMetricsPage(int index);
     void setLatencyPage(int index);
     void setLatencyCdfMode(bool enabled);
@@ -61,6 +70,9 @@ private:
     void appendToCharts(const PpduVisualItem& ppdu);
 
     Ui::Timeline_Display *ui;
+    QSplitter *m_mainSplitter = nullptr;
+    QSplitter *m_chartsSplitter = nullptr;
+    QSplitter *m_metricsSplitter = nullptr;
     PpduTimelineView *m_timelineView = nullptr;
     ThroughputChartWidget *m_throughputChart = nullptr;
     LatencyChartWidget *m_queueingDelayChart = nullptr;

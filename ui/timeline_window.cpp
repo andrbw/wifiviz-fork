@@ -5,6 +5,7 @@
 #include <QCloseEvent>
 #include <QHBoxLayout>
 #include <QScrollArea>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QTimer>
 #include <QWidget>
@@ -16,15 +17,29 @@ TimelineWindow::TimelineWindow(QWidget* parent)
     auto* layout = new QHBoxLayout(central);
     layout->setContentsMargins(0, 0, 0, 0);
 
-    m_timelineDisplay = new Timeline_Display(central);
-    m_detailWindow = new PpduDetailWindow(central);
+    // Splitter rather than a plain layout so the detail panel can be widened for long field
+    // values and narrowed again when the dashboard needs the room. The upper width cap is
+    // gone with it -- the user decides how wide the panel gets.
+    auto* split = new QSplitter(Qt::Horizontal, central);
+    split->setChildrenCollapsible(false);
+    split->setHandleWidth(8);
+    split->setStyleSheet(
+        "QSplitter::handle { background: transparent; }"
+        "QSplitter::handle:hover { background: rgba(105, 116, 129, 0.35); }"
+        "QSplitter::handle:pressed { background: rgba(105, 116, 129, 0.60); }");
+
+    m_timelineDisplay = new Timeline_Display(split);
+    m_detailWindow = new PpduDetailWindow(split);
     m_detailWindow->setMinimumWidth(360);
-    m_detailWindow->setMaximumWidth(420);
     m_timelineDisplay->timelineView()->setDetailWindow(m_detailWindow);
     m_timelineDisplay->timelineView()->enableQuitButton(false);
 
-    layout->addWidget(m_timelineDisplay, 1);
-    layout->addWidget(m_detailWindow);
+    split->addWidget(m_timelineDisplay);
+    split->addWidget(m_detailWindow);
+    split->setStretchFactor(0, 1); // the dashboard absorbs the window's extra width
+    split->setStretchFactor(1, 0);
+    split->setSizes({1200, 400});
+    layout->addWidget(split);
 
     // Add scroll bar
     auto* scrollArea = new QScrollArea(this);

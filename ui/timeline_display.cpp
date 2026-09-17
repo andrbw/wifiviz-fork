@@ -12,13 +12,14 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QFrame>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSplitter>
+#include <QSplitterHandle>
 #include <QStackedWidget>
 #include <QTextCursor>
 #include <QVBoxLayout>
@@ -31,7 +32,9 @@ Timeline_Display::Timeline_Display(QWidget *parent)
 {
     ui->setupUi(this);
 
-    //Grid to distribute the space proportionally at any resolution.
+    // The Designer form caps these containers, which would stop a splitter handle dead once
+    // a pane hit its cap. Lift the caps first; the splitters below then have the full
+    // window to distribute.
     for (QWidget* w : {static_cast<QWidget*>(ui->widget),
                        static_cast<QWidget*>(ui->widget_2),
                        static_cast<QWidget*>(ui->widget_3),
@@ -44,19 +47,50 @@ Timeline_Display::Timeline_Display(QWidget *parent)
             w->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
         }
     }
-    if (auto* grid = qobject_cast<QGridLayout*>(layout()))
-    {
-        grid->setRowStretch(0, 3);    // timeline: the main view, gets the most room
-        grid->setRowStretch(1, 2);    // chart row underneath it
-        grid->setColumnStretch(0, 1); // throughput chart
-        grid->setColumnStretch(1, 2); // latency + metrics stack
-    }
+
+    // A grid fixes the proportions between the panels: the only way to give one of them more
+    // room is to resize the whole window. Re-home the same panels into nested splitters so
+    // every boundary can be dragged directly, keeping the 3:2 (timeline / charts) and 1:2
+    // (throughput / metrics) defaults the grid stretches used.
+    const auto makeSplitter = [this](Qt::Orientation orientation, QWidget* parent) {
+        auto* splitter = new QSplitter(orientation, parent);
+        splitter->setChildrenCollapsible(false); // a pane dragged shut is hard to get back
+        splitter->setHandleWidth(8);
+        splitter->setStyleSheet(
+            "QSplitter::handle { background: transparent; }"
+            "QSplitter::handle:hover { background: rgba(105, 116, 129, 0.35); }"
+            "QSplitter::handle:pressed { background: rgba(105, 116, 129, 0.60); }");
+        return splitter;
+    };
+
+    delete layout(); // the Designer grid; its panels move into the splitters below
+
+    auto* chartsSplitter = makeSplitter(Qt::Horizontal, this);
+    m_chartsSplitter = chartsSplitter;
+    chartsSplitter->addWidget(ui->widget_2); // throughput chart
+    chartsSplitter->addWidget(ui->widget_3); // latency + metrics stack
+    chartsSplitter->setStretchFactor(0, 1);
+    chartsSplitter->setStretchFactor(1, 2);
+
+    auto* mainSplitter = makeSplitter(Qt::Vertical, this);
+    m_mainSplitter = mainSplitter;
+    mainSplitter->addWidget(ui->widget); // timeline
+    mainSplitter->addWidget(chartsSplitter);
+    mainSplitter->setStretchFactor(0, 3);
+    mainSplitter->setStretchFactor(1, 2);
+
+    auto* rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->addWidget(mainSplitter);
 
     m_timelineView = new PpduTimelineView(ui->frame_3);
     m_timelineView->setSizePolicy(
         QSizePolicy::Expanding,
         QSizePolicy::Expanding
     );
+    // Nothing but the toolbar row is mandatory in this view, so without a floor a drag could
+    // reduce the timeline to its buttons. Roughly two rows of PPDUs plus the axis.
+    m_timelineView->setMinimumHeight(240);
 
     auto *layout = new QVBoxLayout(ui->frame_3);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -96,9 +130,12 @@ Timeline_Display::Timeline_Display(QWidget *parent)
     }
     auto *terminalSplit = new QHBoxLayout(ui->frame_2);
     terminalSplit->setContentsMargins(0, 0, 0, 0);
-    terminalSplit->setSpacing(14);
+    terminalSplit->setSpacing(0);
+    auto *metricsSplitter = makeSplitter(Qt::Horizontal, ui->frame_2);
+    m_metricsSplitter = metricsSplitter;
+    terminalSplit->addWidget(metricsSplitter);
 
-    auto *latencyFrame = new QFrame(ui->frame_2);
+    auto *latencyFrame = new QFrame(metricsSplitter);
     latencyFrame->setFrameShape(QFrame::StyledPanel);
     latencyFrame->setFrameShadow(QFrame::Raised);
     auto *latencyLayout = new QVBoxLayout(latencyFrame);
@@ -132,7 +169,7 @@ Timeline_Display::Timeline_Display(QWidget *parent)
     m_linkFilterCombo->addItem("All Links", -1);
     m_linkFilterCombo->setStyleSheet(filterStyle);
 
-    auto *metricsFrame = new QFrame(ui->frame_2);
+    auto *metricsFrame = new QFrame(metricsSplitter);
     metricsFrame->setFrameShape(QFrame::StyledPanel);
     metricsFrame->setFrameShadow(QFrame::Raised);
     auto *metricsLayout = new QVBoxLayout(metricsFrame);
@@ -155,6 +192,31 @@ Timeline_Display::Timeline_Display(QWidget *parent)
     m_metricsLinkFilterCombo->addItem("All Links", -1);
     m_metricsLinkFilterCombo->setStyleSheet(filterStyle);
 
+    // Left to themselves the title labels and the filter combos size to their text, and the
+    // two framed panes then declare a combined minimum around 1100px -- wide enough that the
+    // handle between them and the throughput chart has nowhere to travel, so the throughput
+    // pane can only ever be made narrower. Let the titles shrink (they are the first thing
+    // worth clipping) and cap the combos at a few characters; their popups still show the
+    // full node and link names.
+    for (QLabel* title : {m_latencyTitle, m_metricsTitle})
+    {
+        title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    }
+    for (QComboBox* combo : {m_nodeFilterCombo,
+                             m_linkFilterCombo,
+                             m_metricsNodeFilterCombo,
+                             m_metricsLinkFilterCombo})
+    {
+        // A combo sizes itself to its longest entry, and four of them plus the buttons put a
+        // floor of ~1100px under this column. minimumContentsLength keeps the natural width
+        // sane as node names arrive; the explicit minimum (which overrides the width the
+        // layout would derive) is what actually lets the column be squeezed. Squeezed, a
+        // combo clips its text -- its popup still lists the full names.
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(8);
+        combo->setMinimumWidth(56);
+    }
+
     auto makePageButton = [&](const QString& text) {
         auto *button = new QPushButton(text, metricsFrame);
         button->setCursor(Qt::PointingHandCursor);
@@ -176,7 +238,7 @@ Timeline_Display::Timeline_Display(QWidget *parent)
     m_latencyCdfButton->setCheckable(true);
     m_latencyCdfButton->setToolTip("Toggle CDF view for the current delay chart");
     m_latencyCdfButton->setFixedHeight(34);
-    m_latencyCdfButton->setMinimumWidth(86);
+    m_latencyCdfButton->setMinimumWidth(64);
     m_latencyCdfButton->setStyleSheet(
         "QPushButton {"
         "background: #F5F8FC;"
@@ -274,8 +336,62 @@ Timeline_Display::Timeline_Display(QWidget *parent)
     });
     setMetricsPage(0);
 
-    terminalSplit->addWidget(latencyFrame, 1);
-    terminalSplit->addWidget(metricsFrame, 1);
+    metricsSplitter->addWidget(latencyFrame);
+    metricsSplitter->addWidget(metricsFrame);
+    metricsSplitter->setStretchFactor(0, 1);
+    metricsSplitter->setStretchFactor(1, 1);
+
+    for (QSplitter* splitter : {mainSplitter, chartsSplitter, metricsSplitter})
+    {
+        for (int i = 1; i < splitter->count(); ++i)
+        {
+            if (auto* handle = splitter->handle(i))
+                handle->installEventFilter(this);
+        }
+    }
+}
+
+void Timeline_Display::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    applyDefaultSplitSizes();
+}
+
+bool Timeline_Display::eventFilter(QObject *watched, QEvent *event)
+{
+    // A press on a handle means the user is taking over that boundary. splitterMoved is no
+    // use here: a splitter emits it whenever it re-lays out, including for the sizes set
+    // below, so it cannot tell a drag from a window resize.
+    if (event->type() == QEvent::MouseButtonPress)
+    {
+        if (auto *handle = qobject_cast<QSplitterHandle*>(watched))
+        {
+            if (auto *splitter = handle->splitter())
+                splitter->setProperty("userAdjusted", true);
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void Timeline_Display::applyDefaultSplitSizes()
+{
+    // A splitter sizes each pane from its size hint, and the panes disagree wildly about what
+    // they need: every chart declares a 220px floor, while the timeline view is a plain
+    // QWidget whose hint covers little more than its toolbar. Left alone that hands the
+    // timeline -- the main view -- the smallest pane. So keep imposing the proportions the
+    // old grid enforced (3:2 timeline/charts, 1:2 throughput/metrics) as the window changes
+    // size, until the user drags that particular boundary; from then on it is theirs to set.
+    // Re-applying on resize also repairs the first pass, which runs before the inner
+    // splitters have been laid out and so has nothing sensible to divide up.
+    const auto split = [](QSplitter *splitter, int extent, int first, int total) {
+        if (!splitter || splitter->property("userAdjusted").toBool())
+            return;
+        splitter->setSizes({(extent * first) / total, (extent * (total - first)) / total});
+    };
+
+    split(m_mainSplitter, m_mainSplitter ? m_mainSplitter->height() : 0, 3, 5);
+    split(m_chartsSplitter, m_chartsSplitter ? m_chartsSplitter->width() : 0, 1, 3);
+    split(m_metricsSplitter, m_metricsSplitter ? m_metricsSplitter->width() : 0, 1, 2);
 }
 
 PpduTimelineView* Timeline_Display::timelineView() const
