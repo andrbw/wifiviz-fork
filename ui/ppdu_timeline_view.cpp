@@ -1,6 +1,7 @@
 #include "ppdu_timeline_view.h"
 #include "visualizer_config.h"
 
+#include <QFontMetrics>
 #include <QPainter>
 #include <QMouseEvent>
 #include <QMap>
@@ -237,6 +238,22 @@ static inline QColor rxStateFill(RxState state)
         return QColor(199, 146, 47, 225);
     default:
         return QColor(92, 109, 126, 165);
+    }
+}
+
+/* Short form of rxStateName(), drawn on the PPDU bars that are too narrow for the full name. */
+static inline QString rxStateShortName(RxState state)
+{
+    switch (state)
+    {
+    case RxState::Success:
+        return "OK";
+    case RxState::Collision:
+        return "COLL";
+    case RxState::DecodeFail:
+        return "FAIL";
+    default:
+        return "?";
     }
 }
 
@@ -1022,7 +1039,7 @@ bool PpduTimelineView::showRowLabelTooltip(const QPoint &pos)
     if (rowCount == 0)
         return false;
 
-    const TimelineRowBand band = rowBand(rowCount, 18, 80);
+    const TimelineRowBand band = ppduRowBand();
     if (!band.containsY(pos.y()))
         return false;
 
@@ -1593,6 +1610,20 @@ TimelineRowBand PpduTimelineView::rowBand(int rowCount, int minRowH, int maxRowH
     return band;
 }
 
+/* Band for the PPDU rows. They stack overlapping frames into lanes, so a row holding a deep
+ * overlap needs proportionally more height: a flat 80px cap squeezed the lanes of a single busy
+ * row (the RX timeline groups every frame a receiver heard into one row) down to a few pixels
+ * each, too thin to carry the RX outcome label. The cap grows with the deepest lane stack
+ * instead; the band height still bounds what a row actually gets. */
+TimelineRowBand PpduTimelineView::ppduRowBand() const
+{
+    int maxLanes = 1;
+    for (const auto &row : m_cachedPpduRows)
+        maxLanes = std::max(maxLanes, row.laneCount);
+
+    return rowBand(static_cast<int>(m_cachedPpduRows.size()), 18, std::max(80, 24 * maxLanes));
+}
+
 /* Rows are painted through this rect, so the ones scrolled past either edge of the band stop
  * at the band instead of bleeding into the toolbar or the time axis. */
 QRect PpduTimelineView::rowClipRect(const TimelineRowBand &band) const
@@ -1868,7 +1899,7 @@ void PpduTimelineView::paintPpduTimeline(QPainter &painter)
     if (rowCount == 0)
         return;
 
-    const TimelineRowBand band = rowBand(rowCount, 18, 80);
+    const TimelineRowBand band = ppduRowBand();
     syncVScrollBar(band);
     const int rowH = band.rowH;
     const int topY = band.topY;
@@ -2077,7 +2108,7 @@ void PpduTimelineView::paintRxTimeline(QPainter &painter)
     if (rowCount == 0)
         return;
 
-    const TimelineRowBand band = rowBand(rowCount, 18, 80);
+    const TimelineRowBand band = ppduRowBand();
     syncVScrollBar(band);
     const int rowH = band.rowH;
     const int topY = band.topY;
@@ -2160,12 +2191,17 @@ void PpduTimelineView::paintRxTimeline(QPainter &painter)
             painter.setBrush(Qt::NoBrush);
             painter.drawRoundedRect(rect, 3, 3);
 
-            if (rect.width() >= 74)
+            // The name drops to its short form rather than being cut off mid-word.
+            const QRectF textRect = rect.adjusted(6, 0, -6, 0);
+            const QFontMetrics fm(painter.font());
+            QString label = rxStateName(ppdu.rxState);
+            if (fm.horizontalAdvance(label) > textRect.width())
+                label = rxStateShortName(ppdu.rxState);
+
+            if (fm.horizontalAdvance(label) <= textRect.width())
             {
                 painter.setPen(ppdu.rxState == RxState::Unknown ? QColor(35, 42, 50) : Qt::white);
-                painter.drawText(rect.adjusted(6, 0, -6, 0),
-                                 Qt::AlignVCenter | Qt::AlignLeft,
-                                 rxStateName(ppdu.rxState));
+                painter.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, label);
             }
         }
     }
@@ -3238,7 +3274,7 @@ int PpduTimelineView::hitTest(const QPoint &pos) const
     if (rowCnt == 0)
         return -1;
 
-    const TimelineRowBand band = rowBand(rowCnt, 18, 80);
+    const TimelineRowBand band = ppduRowBand();
     if (!band.containsY(pos.y()))
         return -1;
 

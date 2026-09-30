@@ -156,6 +156,7 @@ private:
     /* ===== geometry ===== */
     int apCount() const;
     TimelineRowBand rowBand(int rowCount, int minRowH, int maxRowH) const;
+    TimelineRowBand ppduRowBand() const;
     QRect rowClipRect(const TimelineRowBand &band) const;
     void syncVScrollBar(const TimelineRowBand &band);
     void scrollRowsBy(int deltaPx);
